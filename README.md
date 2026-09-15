@@ -55,7 +55,7 @@ shasum -a 256 -c SHA256SUMS
 mkdir zed-ipad-source
 cd zed-ipad-source
 tar -xzf ../artifacts/zed-source.tar.gz --strip-components=1
-git apply ../artifacts/source.patch
+patch -p1 < ../artifacts/source.patch
 rustup target add --toolchain 1.94.1 aarch64-apple-ios aarch64-apple-ios-sim
 open ios/Zed.xcodeproj
 ```
