@@ -33,7 +33,7 @@ shasum -a 256 -c SHA256SUMS
 | `Zed-iPadOS-unsigned.ipa` | `Payload/Zed.app` 格式的设备包，需自行签名 |
 | `Zed-iPadOS.app.zip` | 保留 App bundle 结构的未签名应用 |
 | `zed-source.tar.gz` | 对应 PR 提交的完整源码 |
-| `source.patch` | 构建时的修改：强制 Cargo 使用 `--locked` |
+| `source.patch` | 构建时的修改：补齐 iOS 依赖锁文件、强制 Cargo 使用 `--locked` |
 | `build-info.txt` | 源码/构建脚本提交、Xcode/Rust 版本、构建配置 |
 | `SHA256SUMS` | IPA、App ZIP、源码与补丁的 SHA-256 校验值 |
 | `LICENSE*` | 上游许可证 |
@@ -67,13 +67,14 @@ CI 产物使用 `io.github.yly25s.zed.ipad`，命令行关闭了签名并清空�
 ## 构建方式
 
 - `macOS preflight`：实际启动 `macos-26` runner，编译引用 UIKit 的 arm64 iOS Swift 文件。
-- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用 Cargo lock 补丁 →
+- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用仓库保存的 `Cargo.lock.ios` 和 Cargo lock 补丁 →
   通过 Xcode 的 Cargo build phase 构建 `zed_ios` 静态库 → 链接 Swift/UIKit App → 校验 arm64 二进制并打包。
 - 使用 Debug 配置，禁用 Rust debug symbols 和 incremental，保留上游嵌入字体、主题等资源的设置。
   Cargo 并行度为 3，以适配标准 macOS runner。
 - 不预先单独运行一次 Cargo build，避免 Xcode build phase 再编译一次。
 - 固定第三方 Actions 的 commit，工作流只使用 `contents: read` 权限。
-- 只有手动触发或构建脚本/构建 workflow 变更时运行完整构建。README 变更不会重新编译。
+- 完整构建只在手动触发时运行。默认严格使用 `Cargo.lock.ios`；维护者可以勾选 `refresh_lock`
+  重新解析缺失依赖，运行会单独上传实际锁文件，审核后可将它保存回仓库。
 
 如需在本地 Mac 复现 CI，在本仓库内准备 `source/`：
 

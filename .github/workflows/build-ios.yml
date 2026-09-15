@@ -3,10 +3,11 @@ run-name: Build unsigned Zed for iPadOS (${{ github.run_number }})
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/build-ios.yml
-      - scripts/**
+    inputs:
+      refresh_lock:
+        description: Regenerate the iOS dependency lock (maintainers only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -65,6 +66,30 @@ jobs:
           workspaces: source -> target
           key: ios-arm64-debug-no-symbols-xcode26-${{ env.ZED_SOURCE_SHA }}
           cache-on-failure: true
+
+      - name: Resolve and verify iOS dependency lock
+        shell: bash
+        env:
+          REFRESH_LOCK: ${{ inputs.refresh_lock }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts .work
+          cd source
+          if [ "$REFRESH_LOCK" = true ]; then
+            cargo metadata --format-version 1 --filter-platform aarch64-apple-ios > ../.work/cargo-metadata.json
+          else
+            cargo metadata --locked --format-version 1 --filter-platform aarch64-apple-ios > ../.work/cargo-metadata.json
+          fi
+          cp Cargo.lock ../artifacts/Cargo.lock.ios
+          git diff --stat -- Cargo.lock
+
+      - name: Upload resolved dependency lock
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Zed-iPadOS-dependency-lock-${{ github.run_number }}
+          path: artifacts/Cargo.lock.ios
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Build and package unsigned iOS application
         shell: bash
