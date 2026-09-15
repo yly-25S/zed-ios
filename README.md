@@ -11,6 +11,10 @@
 `env_logger 0.11.8` 改为已在上游锁文件中的 `env_logger 0.11.10`。
 未添加、删除或升级任何锁定的第三方包。
 
+已验证：macOS 26.6.2、Xcode 26.6、Rust 1.94.1。
+[完整构建 #3](https://github.com/yly-25S/zed-ios/actions/runs/34992543936) 已通过编译、链接、arm64/iOS 检查和打包；
+[下载该次产物](https://github.com/yly-25S/zed-ios/actions/runs/34992543936/artifacts/10407450650)。
+
 目标为 **arm64 iPad，iPadOS 17 或更新版本**。保留上游的 iPad 设备支持设置，尚未适配 iPhone。
 该移植在 iPad 上渲染界面、处理输入，通过 SSH 使用远端 Mac/Linux 主机进行开发。
 
