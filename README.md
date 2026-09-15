@@ -7,6 +7,10 @@
 这是独立的构建仓库；每次 CI 都检出完整上游源码，固定在 PR 的提交
 `3440251b30d5c5b522d03be285ab794dcb96bcd5`，再生成未签名的 iOS 应用。
 
+仓库中的 `Cargo.lock.ios` 修复上游锁文件的一处过期引用：`dev_container` 的
+`env_logger 0.11.8` 改为已在上游锁文件中的 `env_logger 0.11.10`。
+未添加、删除或升级任何锁定的第三方包。
+
 目标为 **arm64 iPad，iPadOS 17 或更新版本**。保留上游的 iPad 设备支持设置，尚未适配 iPhone。
 该移植在 iPad 上渲染界面、处理输入，通过 SSH 使用远端 Mac/Linux 主机进行开发。
 

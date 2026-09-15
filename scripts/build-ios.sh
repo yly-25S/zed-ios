@@ -58,7 +58,8 @@ PACKAGE_DIR=$(mktemp -d "$BUILD_ROOT/.work/package.XXXXXX")
 trap 'rm -rf "$PACKAGE_DIR"' EXIT
 mkdir "$PACKAGE_DIR/Payload"
 ditto "$APP_PATH" "$PACKAGE_DIR/Payload/Zed.app"
-(cd "$PACKAGE_DIR" && zip -qry "$ARTIFACT_DIR/Zed-iPadOS-unsigned.ipa" Payload)
+(cd "$PACKAGE_DIR" && zip -qry Zed-iPadOS-unsigned.ipa Payload)
+mv "$PACKAGE_DIR/Zed-iPadOS-unsigned.ipa" "$ARTIFACT_DIR/Zed-iPadOS-unsigned.ipa"
 ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_DIR/Zed-iPadOS.app.zip"
 unzip -tq "$ARTIFACT_DIR/Zed-iPadOS-unsigned.ipa"
 
