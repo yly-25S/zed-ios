@@ -18,8 +18,9 @@
 历史构建 #3 不包含这项补丁。
 
 已验证：macOS 26.6.2、Xcode 26.6、Rust 1.94.1。
-[完整构建 #3](https://github.com/yly-25S/zed-ios/actions/runs/34992543936) 已通过编译、链接、arm64/iOS 检查和打包；
-[下载该次产物](https://github.com/yly-25S/zed-ios/actions/runs/34992543936/artifacts/10407450650)。
+[信任修复构建 #5](https://github.com/yly-25S/zed-ios/actions/runs/35033182300) 已通过编译、链接、arm64/iOS 检查和打包；
+[下载该次产物](https://github.com/yly-25S/zed-ios/actions/runs/35033182300/artifacts/10422379269)。
+下载后已核对全部校验和、IPA/App ZIP、最终 Info.plist 和源码补丁还原；真机交互仍待验证。
 
 目标为 **arm64 iPad，iPadOS 17 或更新版本**。保留上游的 iPad 设备支持设置，尚未适配 iPhone。
 该移植在 iPad 上渲染界面、处理输入，通过 SSH 使用远端 Mac/Linux 主机进行开发。
