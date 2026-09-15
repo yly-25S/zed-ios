@@ -31,6 +31,8 @@ jobs:
             -target arm64-apple-ios17.0 -sdk "$SDK" \
             -emit-object "$RUNNER_TEMP/Probe.swift" -o "$RUNNER_TEMP/Probe.o"
           file "$RUNNER_TEMP/Probe.o"
+          xcrun lipo "$RUNNER_TEMP/Probe.o" -verify_arch arm64
+          xcrun vtool -show-build "$RUNNER_TEMP/Probe.o"
           {
             echo '## macOS Actions verified'
             echo 'Successfully compiled UIKit Swift code for arm64 iOS.'

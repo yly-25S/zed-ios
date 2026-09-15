@@ -64,7 +64,12 @@ open ios/Zed.xcodeproj
 将 Bundle Identifier 改为自己可以签名的唯一值，选择连接的 iPad 并运行。
 CI 产物使用 `io.github.yly25s.zed.ipad`，命令行关闭了签名并清空了上游作者的 Team 设置。
 
-启动后在连接界面填写远端 SSH 主机、用户名及项目路径。服务端的设置与限制见
+启动后在连接界面填写远端 SSH 主机、用户名及项目路径。
+该提交的 iOS SSH 实现会选择远端 `~/.zed_server/zed-remote-server-*` 中修改时间最新的服务端。
+需要先从桌面版 Zed 连接该主机以部署服务端，或者把对应源码构建的服务端手动放到这个目录。
+iPad 客户端本身尚未实现自动下载/上传服务端，详见
+[实际的服务端查找代码](https://github.com/dcow/zed/blob/3440251b30d5c5b522d03be285ab794dcb96bcd5/crates/remote/src/transport/russh_ssh.rs#L166)。
+服务端的其他设置与限制见
 [固定版本的上游 iOS README](https://github.com/dcow/zed/blob/3440251b30d5c5b522d03be285ab794dcb96bcd5/ios/README.md)。
 本构建固定在实验性 PR 的版本；远端协议若不兼容，需要使用对应源码的服务端。
 

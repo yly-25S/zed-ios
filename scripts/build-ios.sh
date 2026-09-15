@@ -44,7 +44,7 @@ APP_PATH="$DERIVED_DATA/Build/Products/Debug-iphoneos/Zed.app"
 test -d "$APP_PATH"
 plutil -lint "$APP_PATH/Info.plist"
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")
-xcrun lipo -verify_arch arm64 "$APP_PATH/$executable"
+xcrun lipo "$APP_PATH/$executable" -verify_arch arm64
 {
     file "$APP_PATH/$executable"
     xcrun vtool -show-build "$APP_PATH/$executable"

@@ -111,6 +111,26 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Preserve built app if packaging fails
+        if: failure()
+        shell: bash
+        run: |
+          app=.work/DerivedData/Build/Products/Debug-iphoneos/Zed.app
+          if [ -d "$app" ]; then
+            mkdir -p artifacts
+            ditto -c -k --keepParent "$app" artifacts/Zed-recovery.app.zip
+          fi
+
+      - name: Upload recovery app
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Zed-iPadOS-recovery-${{ github.run_number }}
+          path: artifacts/Zed-recovery.app.zip
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
