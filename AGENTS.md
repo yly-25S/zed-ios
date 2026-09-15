@@ -16,7 +16,8 @@
 | --- | --- |
 | `.github/workflows/macos-preflight.yml` | 用小型 UIKit Swift 编译验证 macOS runner 和 iOS 工具链 |
 | `.github/workflows/build-ios.yml` | 手动触发完整构建、缓存与产物上传 |
-| `scripts/prepare-source.py` | 应用审核过的锁文件，并在上游 Cargo build phase 加入 `--locked` |
+| `scripts/prepare-source.py` | 应用 iOS 信任补丁、审核过的锁文件，并在上游 Cargo build phase 加入 `--locked` |
+| `patches/ios-workspace-trust.patch` | iOS workspace 信任初始化、状态栏入口和首次提示；验收见 `docs/workspace-trust.md` |
 | `scripts/build-ios.sh` | Xcode 构建、检查、打包及对应源码归档 |
 | `Cargo.lock.ios` | 当前源码对应的审核后依赖锁文件 |
 | `source/` | 忽略的上游源码目录；本次本地目录是稀疏检出，CI 检出完整源码 |
@@ -61,7 +62,7 @@
 - 不要只看命令行 build setting 推断成品信息。本次虽然传入 `CURRENT_PROJECT_VERSION`，实际 Info.plist 仍是上游写定的版本 `1.0 (1)`。若修改版本号，必须检查最终 plist。
 - IPA 结构应为 `Payload/Zed.app`；使用新的临时打包目录，避免旧 Payload 文件混入。保留 App bundle 结构，并检查 ZIP 完整性。
 - 发布包同时保留完整对应源码、构建修改补丁、许可证、构建元数据和校验和。本次通过 `git archive HEAD` 加 `git diff --binary` 生成源码与补丁。
-- 当前补丁命令不会包含未跟踪文件，也不会包含仅存在于暂存区的改动。以后新增客户端源文件或调整补丁流程时，必须确认所有实际构建输入都能从归档与补丁恢复；必要时修正归档机制。
+- 当前补丁命令 `git diff --binary HEAD` 包含已暂存和未暂存的已跟踪改动，不包含未跟踪文件。以后新增客户端源文件或调整补丁流程时，必须确认所有实际构建输入都能从归档与补丁恢复；必要时修正归档机制。
 - 核对归档还原后应用补丁的结果，尤其是锁文件和上游构建脚本。不要只附一个会变化的分支链接充当对应源码。
 - 当前应用产物保留 30 天，诊断日志保留 14 天；Actions 链接不是永久存档。重要成品下载到 `artifacts/` 并验证 `SHA256SUMS`。
 - 大文件下载先用 `gh run download`。代理明显拖慢下载时可诊断官方重定向链路，必要时对支持 Range 的最终官方存储端点分块重试；必须验证长度、最终摘要和 ZIP，不能拼接未校验的块。不要把 GitHub token 或临时签名下载 URL 写入日志、仓库或记录文件。
@@ -74,7 +75,7 @@
 - 当前 `crates/remote/src/transport/russh_ssh.rs` 只尝试有限的本地密钥路径和 `authenticate_password`，没有 keyboard-interactive 支持；本次锁定的 russh 是 **0.58.0**，查 API 应使用此版本。
 - SSH `password` 与 `keyboard-interactive` 是不同方法，即使 PAM 最后询问的是同一个账户密码。服务器只提供 `publickey,keyboard-interactive` 时，现客户端仍会误报 `authentication failed: incorrect password`。
 - 排查时对照客户端源码、SSH 握手实际提供的方法、服务端 Match 配置和 PAM 配置。不要仅凭应用报错判断密码错误，也不要先修改服务器认证策略。
-- 远程文件可编辑、有语法高亮不代表 LSP 已启动。本次发现 iOS 入口遗漏桌面入口的 `trusted_worktrees::init`，服务端可能一直等待项目信任。检查信任状态初始化、Restrict/Trust 消息和信任界面，再排查补全协议；初始化须在创建项目/workspace 前完成。目前仅诊断，尚未修复。
+- 远程文件可编辑、有语法高亮不代表 LSP 已启动。iOS 入口原先遗漏桌面入口的 `trusted_worktrees::init`，服务端可能一直等待项目信任。仓库补丁已补齐初始化和状态栏入口；初始化须在创建项目/workspace 前完成。编译通过仍需按 `docs/workspace-trust.md` 检查真机 Restrict/Trust 消息、信任恢复与 LSP 启动。
 - 实现 keyboard-interactive 时需处理多轮、多个或零提示、取消及部分成功；不能把保存的密码自动用于任意 OTP/用户名提示。错误信息应区分方法不支持与凭据被拒绝。
 - OpenSSH 配置缩进不会终止 Match；重复配置需考虑首个生效值。`AuthenticationMethods` 中空格分隔备选方法序列，逗号连接同一序列所需的方法。仅在末尾加 `PasswordAuthentication yes` 不一定能启用密码认证。
 - 同源 Linux remote server 已有本地构建准备，但用户在完成前停止了子代理。不要把“构建启动”写成“安装完成”；具体恢复入口和检查结果见本地 `NEXT-STEPS.md`。

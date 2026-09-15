@@ -45,7 +45,7 @@ jobs:
           path: source
           persist-credentials: false
 
-      - name: Prepare toolchain and locked Cargo build
+      - name: Prepare toolchain, iOS fixes, and locked Cargo build
         shell: bash
         run: |
           set -euo pipefail
@@ -64,7 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.8.2
         with:
           workspaces: source -> target
-          key: ios-arm64-debug-no-symbols-xcode26-${{ env.ZED_SOURCE_SHA }}
+          key: ios-arm64-debug-no-symbols-xcode26-${{ env.ZED_SOURCE_SHA }}-${{ hashFiles('patches/*.patch') }}
           cache-on-failure: true
 
       - name: Resolve and verify iOS dependency lock

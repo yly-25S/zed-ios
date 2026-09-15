@@ -1,0 +1,207 @@
+diff --git a/crates/zed_ios/src/lib.rs b/crates/zed_ios/src/lib.rs
+--- a/crates/zed_ios/src/lib.rs
++++ b/crates/zed_ios/src/lib.rs
+@@ -343,6 +343,13 @@
+         // Database (must be set before anything that uses KeyValueStore)
+         let app_db = db::AppDatabase::new();
+         cx.set_global(app_db);
++
++        // Projects and workspaces subscribe to trust during construction.
++        let trusted_paths = workspace::WorkspaceDb::global(cx)
++            .fetch_trusted_worktrees()
++            .log_err()
++            .unwrap_or_default();
++        project::trusted_worktrees::init(trusted_paths, cx);
+ 
+         // Tokio runtime for russh SSH transport
+         gpui_tokio::init(cx);
+@@ -551,6 +558,13 @@
+                     let Some(window) = window else { return };
+ 
+                     // Status bar items
++                    let workspace_handle = cx.entity().downgrade();
++                    let worktree_store = workspace.project().read(cx).worktree_store();
++                    let workspace_trust = cx.new(|cx| {
++                        crate::connection_landing::WorkspaceTrust::new(
++                            workspace_handle, worktree_store, window, cx,
++                        )
++                    });
+                     let search_button = cx.new(|_| {
+                         search::search_status_button::SearchButton::new()
+                     });
+@@ -584,6 +598,7 @@
+                     });
+ 
+                     workspace.status_bar().update(cx, |status_bar, cx| {
++                        status_bar.add_left_item(workspace_trust, window, cx);
+                         status_bar.add_left_item(search_button, window, cx);
+                         status_bar.add_left_item(lsp_button, window, cx);
+                         status_bar.add_left_item(diagnostic_summary, window, cx);
+diff --git a/crates/zed_ios/src/connection_landing.rs b/crates/zed_ios/src/connection_landing.rs
+--- a/crates/zed_ios/src/connection_landing.rs
++++ b/crates/zed_ios/src/connection_landing.rs
+@@ -8,15 +8,20 @@
+ };
+ use gpui::{
+     AnyWindowHandle, App, AppContext as _, AsyncApp, ClickEvent, Context, Entity, Focusable as _,
+-    Global, IntoElement, Render, SharedString, Task, Window, WindowOptions, div, prelude::*, px,
++    Global, IntoElement, Render, SharedString, Task, WeakEntity, Window, WindowOptions, div,
++    prelude::*, px,
++};
++use project::{
++    trusted_worktrees::{TrustedWorktrees, TrustedWorktreesEvent},
++    worktree_store::{WorktreeStore, WorktreeStoreEvent},
+ };
+ use remote::SshConnectionOptions;
+ use serde::{Deserialize, Serialize};
+ use theme::ActiveTheme;
+ use ui::{
+-    ButtonCommon, ButtonLike, ButtonStyle, Clickable, Color, ContextMenu, Divider, DividerColor,
++    Button, ButtonCommon, ButtonLike, ButtonStyle, Clickable, Color, ContextMenu, Divider, DividerColor,
+     FixedWidth, Headline, Icon, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize,
+-    PopoverMenu, Tooltip, Vector, VectorName, h_flex, rems_from_px, v_flex,
++    PopoverMenu, TintColor, Tooltip, Vector, VectorName, h_flex, rems_from_px, v_flex,
+ };
+ use util::ResultExt;
+ 
+@@ -488,6 +493,123 @@
+     }
+ }
+ 
++pub struct WorkspaceTrust {
++    workspace: WeakEntity<workspace::Workspace>,
++    worktree_store: Entity<WorktreeStore>,
++    prompted: bool,
++}
++
++impl WorkspaceTrust {
++    pub fn new(
++        workspace: WeakEntity<workspace::Workspace>,
++        worktree_store: Entity<WorktreeStore>,
++        window: &Window,
++        cx: &mut Context<Self>,
++    ) -> Self {
++        if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
++            cx.subscribe_in(&trusted_worktrees, window, |this, _, event, window, cx| {
++                let (TrustedWorktreesEvent::Trusted(store, _)
++                | TrustedWorktreesEvent::Restricted(store, _)) = event;
++                if *store == this.worktree_store.downgrade() {
++                    cx.notify();
++                    cx.defer_in(window, Self::prompt_if_needed);
++                }
++            })
++            .detach();
++        }
++        cx.subscribe_in(&worktree_store, window, |_, _, event, window, cx| {
++            if matches!(
++                event,
++                WorktreeStoreEvent::WorktreeAdded(_)
++                    | WorktreeStoreEvent::WorktreeRemoved(..)
++                    | WorktreeStoreEvent::WorktreeReleased(..)
++            ) {
++                cx.notify();
++                cx.defer_in(window, Self::prompt_if_needed);
++            }
++        })
++        .detach();
++
++        Self {
++            workspace,
++            worktree_store,
++            prompted: false,
++        }
++    }
++
++    fn is_restricted(&self, cx: &App) -> bool {
++        TrustedWorktrees::try_get_global(cx).is_some_and(|trusted_worktrees| {
++            trusted_worktrees
++                .read(cx)
++                .has_restricted_worktrees(&self.worktree_store, cx)
++        })
++    }
++
++    fn prompt_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
++        if self.prompted || !self.is_restricted(cx) {
++            return;
++        }
++        // Background sessions must not steal focus from another workspace or the landing page.
++        let Some(Some(multi_workspace)) = window.root::<workspace::MultiWorkspace>() else {
++            return;
++        };
++        if multi_workspace.read(cx).workspace().downgrade() != self.workspace {
++            return;
++        }
++        self.workspace
++            .update(cx, |workspace, cx| {
++                if !workspace.has_active_modal(window, cx) {
++                    self.prompted = true;
++                    workspace.show_worktree_trust_security_modal(false, window, cx);
++                }
++            })
++            .log_err();
++    }
++}
++
++impl Render for WorkspaceTrust {
++    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        div().when(self.is_restricted(cx), |this| {
++            this.child(
++                Button::new("workspace-trust", "Restricted Mode")
++                    .style(ButtonStyle::Tinted(TintColor::Warning))
++                    .label_size(LabelSize::Small)
++                    .color(Color::Warning)
++                    .start_icon(
++                        Icon::new(IconName::Warning)
++                            .size(IconSize::Small)
++                            .color(Color::Warning),
++                    )
++                    .tooltip(|_, cx| {
++                        Tooltip::for_action(
++                            "Trust Workspace",
++                            &workspace::ToggleWorktreeSecurity,
++                            cx,
++                        )
++                    })
++                    .on_click(cx.listener(|this, _, window, cx| {
++                        this.prompted = true;
++                        this.workspace
++                            .update(cx, |workspace, cx| {
++                                workspace.show_worktree_trust_security_modal(false, window, cx);
++                            })
++                            .log_err();
++                    })),
++            )
++        })
++    }
++}
++
++impl workspace::StatusItemView for WorkspaceTrust {
++    fn set_active_pane_item(
++        &mut self,
++        _: Option<&dyn workspace::ItemHandle>,
++        _: &mut Window,
++        _: &mut Context<Self>,
++    ) {
++    }
++}
++
+ pub struct StatusBarSuffix;
+ 
+ impl Render for StatusBarSuffix {
+@@ -531,6 +653,16 @@
+             multi.activate(active, window, cx);
+             multi
+         });
++    }
++
++    // Restriction messages can arrive before the workspace becomes the window root.
++    let trust = active
++        .read(cx)
++        .status_bar()
++        .read(cx)
++        .item_of_type::<WorkspaceTrust>();
++    if let Some(trust) = trust {
++        trust.update(cx, |_, cx| cx.defer_in(window, WorkspaceTrust::prompt_if_needed));
+     }
+ }
+ 

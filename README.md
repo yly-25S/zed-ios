@@ -11,6 +11,12 @@
 `env_logger 0.11.8` 改为已在上游锁文件中的 `env_logger 0.11.10`。
 未添加、删除或升级任何锁定的第三方包。
 
+`patches/ios-workspace-trust.patch` 补齐 iPad 的 workspace 信任初始化和状态栏入口。
+首次打开受限项目时显示已有的信任弹窗；选择继续受限后，可以点击状态栏的
+**Restricted Mode** 或按 `Ctrl-Cmd-S` 再次打开。信任由用户确认，并沿用上游的
+远端同步与数据库保存流程。验证步骤见 [workspace 信任修复](docs/workspace-trust.md)。
+历史构建 #3 不包含这项补丁。
+
 已验证：macOS 26.6.2、Xcode 26.6、Rust 1.94.1。
 [完整构建 #3](https://github.com/yly-25S/zed-ios/actions/runs/34992543936) 已通过编译、链接、arm64/iOS 检查和打包；
 [下载该次产物](https://github.com/yly-25S/zed-ios/actions/runs/34992543936/artifacts/10407450650)。
@@ -41,7 +47,7 @@ shasum -a 256 -c SHA256SUMS
 | `Zed-iPadOS-unsigned.ipa` | `Payload/Zed.app` 格式的设备包，需自行签名 |
 | `Zed-iPadOS.app.zip` | 保留 App bundle 结构的未签名应用 |
 | `zed-source.tar.gz` | 对应 PR 提交的完整源码 |
-| `source.patch` | 构建时的修改：补齐 iOS 依赖锁文件、强制 Cargo 使用 `--locked` |
+| `source.patch` | 构建时的全部已跟踪修改：iOS 信任 UI、依赖锁文件、Cargo `--locked` |
 | `build-info.txt` | 源码/构建脚本提交、Xcode/Rust 版本、构建配置 |
 | `SHA256SUMS` | IPA、App ZIP、源码与补丁的 SHA-256 校验值 |
 | `LICENSE*` | 上游许可证 |
@@ -80,7 +86,7 @@ iPad 客户端本身尚未实现自动下载/上传服务端，详见
 ## 构建方式
 
 - `macOS preflight`：实际启动 `macos-26` runner，编译引用 UIKit 的 arm64 iOS Swift 文件。
-- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用仓库保存的 `Cargo.lock.ios` 和 Cargo lock 补丁 →
+- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用 iOS 信任补丁、`Cargo.lock.ios` 和 Cargo lock 补丁 →
   通过 Xcode 的 Cargo build phase 构建 `zed_ios` 静态库 → 链接 Swift/UIKit App → 校验 arm64 二进制并打包。
 - 使用 Debug 配置，禁用 Rust debug symbols 和 incremental，保留上游嵌入字体、主题等资源的设置。
   Cargo 并行度为 3，以适配标准 macOS runner。

@@ -63,9 +63,9 @@ mv "$PACKAGE_DIR/Zed-iPadOS-unsigned.ipa" "$ARTIFACT_DIR/Zed-iPadOS-unsigned.ipa
 ditto -c -k --keepParent "$APP_PATH" "$ARTIFACT_DIR/Zed-iPadOS.app.zip"
 unzip -tq "$ARTIFACT_DIR/Zed-iPadOS-unsigned.ipa"
 
-# Ship the exact corresponding source and the small CI-only Cargo lock patch.
+# Ship the corresponding source and all tracked build changes, including iOS fixes.
 git archive --format=tar --prefix=zed-source/ HEAD | gzip > "$ARTIFACT_DIR/zed-source.tar.gz"
-git diff --binary > "$ARTIFACT_DIR/source.patch"
+git diff --binary HEAD > "$ARTIFACT_DIR/source.patch"
 cp LICENSE* "$ARTIFACT_DIR/"
 cd "$ARTIFACT_DIR"
 shasum -a 256 ./*.ipa ./*.zip ./*.tar.gz source.patch > SHA256SUMS
