@@ -205,3 +205,16 @@ diff --git a/crates/zed_ios/src/connection_landing.rs b/crates/zed_ios/src/conne
      }
  }
  
+diff --git a/crates/workspace/src/security_modal.rs b/crates/workspace/src/security_modal.rs
+--- a/crates/workspace/src/security_modal.rs
++++ b/crates/workspace/src/security_modal.rs
+@@ -83,6 +83,9 @@
+             .track_focus(&self.focus_handle(cx))
+             .on_action(cx.listener(|this, _: &menu::Confirm, _window, cx| {
+                 this.trust_and_dismiss(cx);
++            }))
++            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
++                this.dismiss(cx);
+             }))
+             .on_action(cx.listener(|security_modal, _: &ToggleWorktreeSecurity, _window, cx| {
+                 security_modal.trusted = Some(false);
