@@ -1,3 +1,5 @@
 /source/
 /artifacts/
 /.work/
+
+__pycache__/

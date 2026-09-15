@@ -1,0 +1,98 @@
+name: Build Zed for iOS
+run-name: Build unsigned Zed for iPadOS (${{ github.run_number }})
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-ios.yml
+      - scripts/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZED_SOURCE_SHA: 3440251b30d5c5b522d03be285ab794dcb96bcd5
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '3'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: 'off'
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: 'false'
+  IPHONEOS_DEPLOYMENT_TARGET: '17.0'
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - name: Checkout build automation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Zed iPad port
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: dcow/zed
+          ref: ${{ env.ZED_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+
+      - name: Prepare toolchain and locked Cargo build
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$ZED_SOURCE_SHA"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          df -h .
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("source/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal --target aarch64-apple-ios
+          python3 scripts/prepare-source.py source
+          cd source
+          rustup show active-toolchain
+          cargo --version
+
+      - name: Cache Rust dependencies and compilation
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.8.2
+        with:
+          workspaces: source -> target
+          key: ios-arm64-debug-no-symbols-xcode26-${{ env.ZED_SOURCE_SHA }}
+          cache-on-failure: true
+
+      - name: Build and package unsigned iOS application
+        shell: bash
+        run: scripts/build-ios.sh
+
+      - name: Upload iOS packages and source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Zed-iPadOS-unsigned-${{ github.run_number }}
+          path: |
+            artifacts/*.ipa
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            artifacts/build-info.txt
+            artifacts/source.patch
+            artifacts/LICENSE*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Zed-iPadOS-build-logs-${{ github.run_number }}
+          path: |
+            artifacts/*.log
+            artifacts/*.txt
+          if-no-files-found: warn
+          retention-days: 14
