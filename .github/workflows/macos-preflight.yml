@@ -1,0 +1,43 @@
+name: macOS preflight
+
+on:
+  push:
+    paths:
+      - .github/workflows/macos-preflight.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Verify macOS, Xcode, and iOS cross compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcodebuild -showsdks
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          cat > "$RUNNER_TEMP/Probe.swift" <<'SWIFT'
+          import UIKit
+          public func probe() -> UIView { UIView(frame: .zero) }
+          SWIFT
+          xcrun --sdk iphoneos swiftc \
+            -target arm64-apple-ios17.0 -sdk "$SDK" \
+            -emit-object "$RUNNER_TEMP/Probe.swift" -o "$RUNNER_TEMP/Probe.o"
+          file "$RUNNER_TEMP/Probe.o"
+          {
+            echo '## macOS Actions verified'
+            echo 'Successfully compiled UIKit Swift code for arm64 iOS.'
+            echo '```'
+            sw_vers
+            uname -m
+            xcodebuild -version
+            file "$RUNNER_TEMP/Probe.o"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
