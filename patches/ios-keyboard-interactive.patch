@@ -1,11 +1,13 @@
 diff --git a/crates/remote/src/remote.rs b/crates/remote/src/remote.rs
 --- a/crates/remote/src/remote.rs
 +++ b/crates/remote/src/remote.rs
-@@ -14,6 +14,8 @@
+@@ -14,6 +14,10 @@
  pub use transport::docker::DockerConnectionOptions;
  pub use transport::ssh::{SshConnectionOptions, SshPortForwardOption};
  #[cfg(feature = "russh-transport")]
-+pub use transport::russh_auth::{AuthenticationChallenge, AuthenticationPrompt};
++pub use transport::russh_auth::{
++    AuthenticationCancelled, AuthenticationChallenge, AuthenticationPrompt,
++};
 +#[cfg(feature = "russh-transport")]
  pub use transport::russh_ssh::RusshRemoteConnection;
  pub use transport::wsl::WslConnectionOptions;
@@ -38,6 +40,35 @@ diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_clien
      fn ask_password(
          &self,
          prompt: String,
+@@ -645,7 +663,14 @@
+                         })
+                     })
+                     .await
+-                    .map_err(|error| error.cloned())?;
++                    .map_err(|error| {
++                        // Keep explicit cancellation distinguishable when cloning a shared error.
++                        #[cfg(feature = "russh-transport")]
++                        if error.is::<crate::AuthenticationCancelled>() {
++                            return crate::AuthenticationCancelled.into();
++                        }
++                        error.cloned()
++                    })?;
+ 
+                 let io_task = remote_connection.start_proxy(
+                     unique_identifier,
+@@ -662,6 +687,12 @@
+             {
+                 Ok((remote_connection, io_task)) => (remote_connection, io_task),
+                 Err(error) => {
++                    #[cfg(feature = "russh-transport")]
++                    if error.is::<crate::AuthenticationCancelled>() {
++                        delegate.set_status(Some("SSH authentication cancelled"), cx);
++                        // Stop the automatic reconnect loop after the user cancels its prompt.
++                        return State::ReconnectExhausted;
++                    }
+                     failed!(error, attempts, remote_connection, delegate);
+                 }
+             };
 diff --git a/crates/remote/src/transport.rs b/crates/remote/src/transport.rs
 --- a/crates/remote/src/transport.rs
 +++ b/crates/remote/src/transport.rs
@@ -54,7 +85,7 @@ diff --git a/crates/remote/src/transport/russh_auth.rs b/crates/remote/src/trans
 new file mode 100644
 --- /dev/null
 +++ b/crates/remote/src/transport/russh_auth.rs
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,234 @@
 +//! SSH authentication without a dependency on the application UI.
 +
 +use anyhow::{Context as _, Result, bail};
@@ -65,6 +96,17 @@ new file mode 100644
 +    keys::{PrivateKey, PrivateKeyWithHashAlg},
 +};
 +use std::sync::Arc;
++
++#[derive(Debug)]
++pub struct AuthenticationCancelled;
++
++impl std::fmt::Display for AuthenticationCancelled {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("SSH authentication cancelled")
++    }
++}
++
++impl std::error::Error for AuthenticationCancelled {}
 +
 +pub struct AuthenticationPrompt {
 +    text: String,
@@ -281,7 +323,17 @@ new file mode 100644
 diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transport/russh_ssh.rs
 --- a/crates/remote/src/transport/russh_ssh.rs
 +++ b/crates/remote/src/transport/russh_ssh.rs
-@@ -17,7 +17,6 @@
+@@ -1,3 +1,4 @@
++use super::russh_auth::{self, AuthenticationChallenge};
+ use crate::{
+     RemoteClientDelegate, RemotePlatform,
+     json_log::LogRecord,
+@@ -13,11 +14,11 @@
+ use async_trait::async_trait;
+ use collections::HashMap;
+ use futures::channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
++use futures::{FutureExt as _, StreamExt as _};
+ use gpui::{App, AsyncApp, Task};
  use gpui_tokio::Tokio;
  use prost::Message as _;
  use rpc::proto::Envelope;
@@ -289,7 +341,7 @@ diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transp
  use std::sync::{
      Arc,
      atomic::{AtomicBool, Ordering},
-@@ -81,86 +80,99 @@
+@@ -81,86 +82,99 @@
      "id_rsa",
  ];
  
@@ -415,7 +467,7 @@ diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transp
 -    }
 -
 -    false
-+                    .context("SSH authentication cancelled")??;
++                    .map_err(|_| russh_auth::AuthenticationCancelled)??;
 +                encrypted
 +                    .into_iter()
 +                    .map(|response| response.decrypt(IKnowWhatIAmDoingAndIHaveReadTheDocs))
@@ -442,7 +494,7 @@ diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transp
 +                            response,
 +                        })
 +                        .map_err(|_| anyhow!("SSH authentication prompt is unavailable"))?;
-+                    receive.await.context("SSH authentication cancelled")?
++                    receive.await.map_err(|_| russh_auth::AuthenticationCancelled)?
 +                }
 +                .boxed()
 +            })
@@ -467,7 +519,7 @@ diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transp
  }
  
  /// Resolve the remote server binary path in `~/.zed_server/`.
-@@ -206,7 +218,8 @@
+@@ -206,7 +220,8 @@
          delegate.set_status(Some("Connecting"), cx);
  
          let config = Arc::new(russh::client::Config {
@@ -477,7 +529,7 @@ diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transp
              keepalive_interval: Some(std::time::Duration::from_secs(15)),
              keepalive_max: 3,
              ..Default::default()
-@@ -227,62 +240,15 @@
+@@ -227,62 +242,15 @@
  
          delegate.set_status(Some("Authenticating"), cx);
  
@@ -625,7 +677,7 @@ new file mode 100644
 +            futures::pin_mut!(cancelled, receive);
 +            futures::select! {
 +                _ = cancelled => None,
-+                result = receive => Some(result.context("SSH authentication cancelled").and_then(|result| result)),
++                result = receive => Some(result.map_err(|_| anyhow::Error::from(remote::AuthenticationCancelled)).and_then(|result| result)),
 +            }
 +        };
 +        // Also close the UI if its connection task was cancelled while waiting for the user.
@@ -708,7 +760,7 @@ new file mode 100644
 +    }
 +
 +    fn cancel(&mut self, cx: &mut Context<Self>) {
-+        self.finish(Err(anyhow::anyhow!("SSH authentication cancelled")), cx);
++        self.finish(Err(remote::AuthenticationCancelled.into()), cx);
 +    }
 +
 +    fn move_focus(&self, backwards: bool, window: &mut Window, cx: &mut App) {

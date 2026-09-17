@@ -1,4 +1,4 @@
-use crate::authentication::{AuthenticationChallenge, authenticate};
+use crate::authentication::{AuthenticationCancelled, AuthenticationChallenge, authenticate};
 use anyhow::Result;
 use futures::FutureExt as _;
 use russh::{
@@ -352,10 +352,10 @@ async fn cancellation_sends_no_responses_and_does_not_retry() {
         ],
         vec![],
         Some("never-send"),
-        vec![Err(anyhow::anyhow!("SSH authentication cancelled"))],
+        vec![Err(AuthenticationCancelled.into())],
     )
     .await;
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(result.unwrap_err().is::<AuthenticationCancelled>());
 }
 
 #[tokio::test]
@@ -500,8 +500,8 @@ async fn password_prompt_can_be_cancelled_without_an_authentication_attempt() {
         vec![None(reject(&[PasswordMethod], false))],
         vec![],
         Option::None,
-        vec![Err(anyhow::anyhow!("SSH authentication cancelled"))],
+        vec![Err(AuthenticationCancelled.into())],
     )
     .await;
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(result.unwrap_err().is::<AuthenticationCancelled>());
 }

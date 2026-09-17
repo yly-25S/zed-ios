@@ -11,7 +11,7 @@
 - keyboard-interactive 的任何字段都不会自动填入保存的密码，也不会保存回答。用户名、OTP 和 PAM 密码均由用户明确输入。
 - 空协议提示返回空字符串；零字段但带说明的请求显示说明并等待 Continue。每轮回答保持服务器要求的顺序。
 - 部分成功继续完成服务器要求的下一因素。每个认证阶段中，password 和 keyboard-interactive 各最多尝试两次。
-- Cancel、Escape 或 Ctrl-C 取消当前认证；Enter 提交，Tab / Shift-Tab 切换输入框与按钮。
+- Cancel、Escape 或 Ctrl-C 取消当前认证，并停止本次自动重连；Enter 提交，Tab / Shift-Tab 切换输入框与按钮。
 - 连接页和 workspace 重连共用弹窗；并发认证排队显示主机信息。已有其他 workspace 弹窗时提示先关闭弹窗再重连。
 - 无可用方法、凭据被拒绝和取消使用不同错误信息；日志不记录回答或包含回答的发送错误。
 
