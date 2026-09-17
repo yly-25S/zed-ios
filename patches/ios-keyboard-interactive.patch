@@ -1090,16 +1090,18 @@ diff --git a/crates/zed_ios/src/lib.rs b/crates/zed_ios/src/lib.rs
  
  #[cfg(target_os = "ios")]
  mod connection_landing;
-@@ -955,6 +958,13 @@
+@@ -955,6 +958,15 @@
                  Err(error) => log::error!("Failed to load vim keymap: {error}"),
              }
          }
++        // Match the focused editor's depth so its default bindings cannot consume these keys.
++        let authentication_context = Some("SshAuthentication || SshAuthentication > Editor");
 +        cx.bind_keys([
-+            gpui::KeyBinding::new("enter", menu::Confirm, Some("SshAuthentication")),
-+            gpui::KeyBinding::new("escape", menu::Cancel, Some("SshAuthentication")),
-+            gpui::KeyBinding::new("ctrl-c", menu::Cancel, Some("SshAuthentication")),
-+            gpui::KeyBinding::new("tab", menu::SelectNext, Some("SshAuthentication")),
-+            gpui::KeyBinding::new("shift-tab", menu::SelectPrevious, Some("SshAuthentication")),
++            gpui::KeyBinding::new("enter", menu::Confirm, authentication_context),
++            gpui::KeyBinding::new("escape", menu::Cancel, authentication_context),
++            gpui::KeyBinding::new("ctrl-c", menu::Cancel, authentication_context),
++            gpui::KeyBinding::new("tab", menu::SelectNext, authentication_context),
++            gpui::KeyBinding::new("shift-tab", menu::SelectPrevious, authentication_context),
 +        ]);
      }
  
