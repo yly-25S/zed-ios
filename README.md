@@ -26,6 +26,10 @@
 下载后已核对全部校验和、IPA/App ZIP、最终 Info.plist 和源码补丁还原；
 2026-09-17 用户真机验证后反馈信任修复功能正常。
 
+[SSH 认证修复构建 #10](https://github.com/yly-25S/zed-ios/actions/runs/35247212631) 已通过编译、链接和打包；
+[下载认证修复包](https://github.com/yly-25S/zed-ios/actions/runs/35247212631/artifacts/10508209026)。
+15 项本地协议测试、下载产物校验和完整源码还原均通过；keyboard-interactive 的 iPad 真机验收仍待完成。
+
 目标为 **arm64 iPad，iPadOS 17 或更新版本**。保留上游的 iPad 设备支持设置，尚未适配 iPhone。
 该移植在 iPad 上渲染界面、处理输入，通过 SSH 使用远端 Mac/Linux 主机进行开发。
 

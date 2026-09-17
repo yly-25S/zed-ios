@@ -9,6 +9,7 @@
 - 已验证目标：arm64 真机、iPadOS 17+；没有完成 iPhone 适配。iPad 本地渲染界面和处理输入，开发能力依赖 SSH 远端。
 - [完整构建 #3](https://github.com/yly-25S/zed-ios/actions/runs/34992543936) 成功，构建自动化提交为 `73d9616b83e6f663e3728a5b63e5b25462cc3bdc`。当时环境为 macOS 26.6.2 arm64、Xcode 26.6、iPhoneOS SDK 26.5、Rust 1.94.1；完成约需 20 分钟。
 - [信任修复构建 #5](https://github.com/yly-25S/zed-ios/actions/runs/35033182300) 成功，构建提交为 `e80fb1f02c127cd6c9a8b9de7ff02615ada5f65a`，使用同样版本的工具链。已核对下载产物的摘要、ZIP、最终 plist、arm64/iOS 17 平台和源码还原；2026-09-17 用户真机验证后反馈信任修复功能正常，详见 `docs/workspace-trust.md`。
+- [SSH 认证修复构建 #10](https://github.com/yly-25S/zed-ios/actions/runs/35247212631) 成功，构建提交为 `9a7ba6b409249a10fdffbff61e0bbac4965a8f4c`。2026-09-18 已核对完整下载产物及全部源码还原；15 项本地 russh 协议测试通过。实际工具链仍为 macOS 26.6.2、Xcode 26.6、SDK 26.5、Rust 1.94.1；keyboard-interactive 的真机认证验收待完成，详见 `docs/ssh-authentication.md`。
 - 成功范围是编译、链接、二进制检查和未签名打包；不能据此声称真机交互、SSH 认证、远端协议或安装签名均已验证。
 
 ## 文件分工

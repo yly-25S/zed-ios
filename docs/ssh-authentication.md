@@ -48,6 +48,25 @@ python3 tests/verify-source.py artifacts/zed-source.tar.gz
 `prepare-source.py` 使用 `git apply --intent-to-add`，使新增源文件也进入打包的 `git diff --binary HEAD`；
 已暂存的修改同样包含在源码补丁中。
 
+## 已完成的构建验证
+
+2026-09-18（Asia/Chongqing），[完整构建 #10](https://github.com/yly-25S/zed-ios/actions/runs/35247212631)
+成功，构建提交为 `9a7ba6b409249a10fdffbff61e0bbac4965a8f4c`。
+[下载未签名应用与对应源码](https://github.com/yly-25S/zed-ios/actions/runs/35247212631/artifacts/10508209026)。
+
+- 本地 15 项协议测试通过；实际 iOS 目标通过 Rust/Swift 编译、链接和打包。
+- 实际工具链：macOS 26.6.2、Xcode 26.6、iPhoneOS SDK 26.5、Rust 1.94.1。
+- 已下载到 `artifacts/keyboard-interactive-build-10/`，核对 GitHub 整包摘要、全部 `SHA256SUMS`、
+  IPA/App ZIP 完整性及应用文件的一致性。
+- 成品为 arm64、iOS 真机平台、最低 17.0；最终 plist 为 iPad `[2]`、
+  `io.github.yly25s.zed.ipad`、版本 `1.0 (1)`。
+- 源码归档加 `source.patch` 逐文件还原为审核后的完整源码，权限、符号链接及两个新增认证源文件均一致；
+  `Cargo.lock.ios` 摘要保持不变。
+- 可选缓存恢复步骤命中 #9 的已审核依赖缓存，并将本次结果保存到当前补丁的独立缓存键。
+
+IPA SHA-256：`80754ce4e0b6615063f19cf6a3cc342a7902eb4ce081ca2788ac0fc42f94500c`。
+keyboard-interactive 的 iPad 真机认证与提示交互仍待下面的验收。
+
 ## iPad 验收
 
 编译和协议测试不替代设备上的提示交互验证。新包应逐项检查：
