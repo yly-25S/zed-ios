@@ -1095,7 +1095,7 @@ diff --git a/crates/zed_ios/src/lib.rs b/crates/zed_ios/src/lib.rs
              }
          }
 +        // Match the focused editor's depth so its default bindings cannot consume these keys.
-+        let authentication_context = Some("SshAuthentication || SshAuthentication > Editor");
++        let authentication_context = Some("SshAuthentication || (SshAuthentication > Editor)");
 +        cx.bind_keys([
 +            gpui::KeyBinding::new("enter", menu::Confirm, authentication_context),
 +            gpui::KeyBinding::new("escape", menu::Cancel, authentication_context),
