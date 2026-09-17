@@ -1048,6 +1048,24 @@ diff --git a/crates/zed_ios/src/connection_landing.rs b/crates/zed_ios/src/conne
      }
  
      fn render_error_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+@@ -2733,7 +2648,7 @@
+ 
+ impl Render for ConnectionLanding {
+     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+-        let colors = cx.theme().colors();
++        let background = cx.theme().colors().background;
+         let insets = window.safe_area_insets();
+ 
+         let mut content = div()
+@@ -2746,7 +2661,7 @@
+                 window.focus_prev(cx);
+             })
+             .size_full()
+-            .bg(colors.background)
++            .bg(background)
+             .pt(insets.top)
+             .pb(insets.bottom)
+             .flex()
 @@ -2768,12 +2683,24 @@
              }
          }
@@ -1067,7 +1085,7 @@ diff --git a/crates/zed_ios/src/connection_landing.rs b/crates/zed_ios/src/conne
 +                    .inset_0()
 +                    .size_full()
 +                    .occlude()
-+                    .bg(colors.background.opacity(0.9))
++                    .bg(background.opacity(0.9))
 +                    .flex()
 +                    .items_center()
 +                    .justify_center()

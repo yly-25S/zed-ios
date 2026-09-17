@@ -8,6 +8,10 @@ on:
         description: Regenerate the iOS dependency lock (maintainers only)
         type: boolean
         default: false
+      cache_seed_key:
+        description: Optional prior Rust dependency cache key (maintainers only)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -61,11 +65,22 @@ jobs:
           cargo --version
 
       - name: Cache Rust dependencies and compilation
+        id: rust-cache
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.8.2
         with:
           workspaces: source -> target
           key: ios-arm64-debug-no-symbols-xcode26-${{ env.ZED_SOURCE_SHA }}-${{ hashFiles('patches/*.patch') }}
           cache-on-failure: true
+
+      # A code-only patch may reuse compiled dependencies from a reviewed prior run.
+      # The normal cache still saves under the current patch/toolchain/lock key.
+      - name: Restore optional prior dependency cache
+        if: steps.rust-cache.outputs.cache-hit != 'true' && inputs.cache_seed_key != ''
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.8.2
+        with:
+          workspaces: source -> target
+          key: ${{ inputs.cache_seed_key }}
+          save-if: 'false'
 
       - name: Resolve and verify iOS dependency lock
         shell: bash
