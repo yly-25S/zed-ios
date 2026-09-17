@@ -17,6 +17,9 @@
 远端同步与数据库保存流程。验证步骤见 [workspace 信任修复](docs/workspace-trust.md)。
 历史构建 #3 不包含这项补丁。
 
+`patches/ios-keyboard-interactive.patch` 支持 SSH keyboard-interactive/PAM、多轮验证码和取消，
+保留 password 登录。服务器提示不会自动使用保存的密码，详见 [SSH 认证修复与验收](docs/ssh-authentication.md)。
+
 已验证：macOS 26.6.2、Xcode 26.6、Rust 1.94.1。
 [信任修复构建 #5](https://github.com/yly-25S/zed-ios/actions/runs/35033182300) 已通过编译、链接、arm64/iOS 检查和打包；
 [下载该次产物](https://github.com/yly-25S/zed-ios/actions/runs/35033182300/artifacts/10422379269)。
@@ -49,7 +52,7 @@ shasum -a 256 -c SHA256SUMS
 | `Zed-iPadOS-unsigned.ipa` | `Payload/Zed.app` 格式的设备包，需自行签名 |
 | `Zed-iPadOS.app.zip` | 保留 App bundle 结构的未签名应用 |
 | `zed-source.tar.gz` | 对应 PR 提交的完整源码 |
-| `source.patch` | 构建时的全部已跟踪修改：iOS 信任 UI、依赖锁文件、Cargo `--locked` |
+| `source.patch` | 构建修改及新增源文件：iOS 信任 UI、SSH 认证、依赖锁文件、Cargo `--locked` |
 | `build-info.txt` | 源码/构建脚本提交、Xcode/Rust 版本、构建配置 |
 | `SHA256SUMS` | IPA、App ZIP、源码与补丁的 SHA-256 校验值 |
 | `LICENSE*` | 上游许可证 |
@@ -88,7 +91,7 @@ iPad 客户端本身尚未实现自动下载/上传服务端，详见
 ## 构建方式
 
 - `macOS preflight`：实际启动 `macos-26` runner，编译引用 UIKit 的 arm64 iOS Swift 文件。
-- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用 iOS 信任补丁、`Cargo.lock.ios` 和 Cargo lock 补丁 →
+- `Build Zed for iOS`：检出固定源码 → 安装源码指定的 Rust 1.94.1 → 应用 iOS 信任/SSH 认证补丁、`Cargo.lock.ios` 和 Cargo lock 补丁 →
   通过 Xcode 的 Cargo build phase 构建 `zed_ios` 静态库 → 链接 Swift/UIKit App → 校验 arm64 二进制并打包。
 - 使用 Debug 配置，禁用 Rust debug symbols 和 incremental，保留上游嵌入字体、主题等资源的设置。
   Cargo 并行度为 3，以适配标准 macOS runner。

@@ -1,0 +1,1106 @@
+diff --git a/crates/remote/src/remote.rs b/crates/remote/src/remote.rs
+--- a/crates/remote/src/remote.rs
++++ b/crates/remote/src/remote.rs
+@@ -14,6 +14,8 @@
+ pub use transport::docker::DockerConnectionOptions;
+ pub use transport::ssh::{SshConnectionOptions, SshPortForwardOption};
+ #[cfg(feature = "russh-transport")]
++pub use transport::russh_auth::{AuthenticationChallenge, AuthenticationPrompt};
++#[cfg(feature = "russh-transport")]
+ pub use transport::russh_ssh::RusshRemoteConnection;
+ pub use transport::wsl::WslConnectionOptions;
+ #[cfg(target_os = "windows")]
+diff --git a/crates/remote/src/remote_client.rs b/crates/remote/src/remote_client.rs
+--- a/crates/remote/src/remote_client.rs
++++ b/crates/remote/src/remote_client.rs
+@@ -125,6 +125,24 @@
+ }
+ 
+ pub trait RemoteClientDelegate: Send + Sync {
++    #[cfg(feature = "russh-transport")]
++    fn ask_authentication(
++        &self,
++        _endpoint: String,
++        _challenge: crate::AuthenticationChallenge,
++        tx: oneshot::Sender<Result<Vec<EncryptedPassword>>>,
++        _cx: &mut AsyncApp,
++    ) {
++        if tx
++            .send(Err(anyhow::anyhow!(
++                "Interactive SSH authentication prompts are not supported by this client"
++            )))
++            .is_err()
++        {
++            log::debug!("SSH authentication request no longer active");
++        }
++    }
++
+     fn ask_password(
+         &self,
+         prompt: String,
+diff --git a/crates/remote/src/transport.rs b/crates/remote/src/transport.rs
+--- a/crates/remote/src/transport.rs
++++ b/crates/remote/src/transport.rs
+@@ -17,6 +17,8 @@
+ pub mod docker;
+ #[cfg(any(test, feature = "test-support"))]
+ pub mod mock;
++#[cfg(feature = "russh-transport")]
++pub mod russh_auth;
+ #[cfg(feature = "russh-transport")]
+ pub mod russh_ssh;
+ pub mod ssh;
+diff --git a/crates/remote/src/transport/russh_auth.rs b/crates/remote/src/transport/russh_auth.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/remote/src/transport/russh_auth.rs
+@@ -0,0 +1,223 @@
++//! SSH authentication without a dependency on the application UI.
++
++use anyhow::{Context as _, Result, bail};
++use futures::future::BoxFuture;
++use russh::{
++    MethodKind, MethodSet,
++    client::{AuthResult, Handle, Handler, KeyboardInteractiveAuthResponse},
++    keys::{PrivateKey, PrivateKeyWithHashAlg},
++};
++use std::sync::Arc;
++
++pub struct AuthenticationPrompt {
++    text: String,
++    echo: bool,
++}
++
++impl AuthenticationPrompt {
++    pub fn text(&self) -> &str {
++        &self.text
++    }
++
++    pub fn echo(&self) -> bool {
++        self.echo
++    }
++}
++
++pub struct AuthenticationChallenge {
++    name: String,
++    instructions: String,
++    prompts: Vec<AuthenticationPrompt>,
++}
++
++impl AuthenticationChallenge {
++    pub fn password(prompt: String) -> Self {
++        Self {
++            name: "SSH password".into(),
++            instructions: String::new(),
++            prompts: vec![AuthenticationPrompt {
++                text: prompt,
++                echo: false,
++            }],
++        }
++    }
++
++    pub fn name(&self) -> &str {
++        &self.name
++    }
++
++    pub fn instructions(&self) -> &str {
++        &self.instructions
++    }
++
++    pub fn prompts(&self) -> &[AuthenticationPrompt] {
++        &self.prompts
++    }
++}
++
++/// A prompt callback must return responses in prompt order, or an error on cancellation.
++/// Stored passwords are only used with the SSH password method, never for server prompts.
++pub async fn authenticate<H: Handler>(
++    handle: &mut Handle<H>,
++    username: &str,
++    keys: Vec<Arc<PrivateKey>>,
++    mut password: Option<String>,
++    mut prompt: impl FnMut(AuthenticationChallenge) -> BoxFuture<'static, Result<Vec<String>>> + Send,
++) -> Result<()> {
++    let mut result = handle
++        .authenticate_none(username)
++        .await
++        .context("Could not query SSH authentication methods")?;
++    let mut keys = keys.into_iter();
++    let mut password_attempts = 0;
++    let mut keyboard_attempts = 0;
++    let mut rejected = false;
++    let mut partial = false;
++
++    loop {
++        let methods = match result {
++            AuthResult::Success => return Ok(()),
++            AuthResult::Failure {
++                remaining_methods,
++                partial_success,
++            } => {
++                if partial_success {
++                    // A completed factor is not a rejection. Start a new authentication stage.
++                    partial = true;
++                    password_attempts = 0;
++                    keyboard_attempts = 0;
++                    rejected = false;
++                }
++                remaining_methods
++            }
++        };
++
++        if methods.contains(&MethodKind::PublicKey) {
++            if let Some(key) = keys.next() {
++                let hash = handle.best_supported_rsa_hash().await?.flatten();
++                result = handle
++                    .authenticate_publickey(username, PrivateKeyWithHashAlg::new(key, hash))
++                    .await?;
++                rejected = true;
++                continue;
++            }
++        }
++
++        // Try the ordinary password first, then a keyboard-interactive alternative before
++        // asking for a second password. Each rejected method has a bounded retry count.
++        if methods.contains(&MethodKind::Password)
++            && (password_attempts == 0
++                || (password_attempts < 2
++                    && (!methods.contains(&MethodKind::KeyboardInteractive)
++                        || keyboard_attempts >= 2)))
++        {
++            let response = match password.take() {
++                Some(password) => password,
++                None => {
++                    let mut responses =
++                        prompt(AuthenticationChallenge::password("Password:".into())).await?;
++                    if responses.len() != 1 {
++                        bail!("The SSH password prompt returned an invalid response count");
++                    }
++                    responses.remove(0)
++                }
++            };
++            password_attempts += 1;
++            result = handle.authenticate_password(username, response).await?;
++            rejected = true;
++            continue;
++        }
++
++        if methods.contains(&MethodKind::KeyboardInteractive) && keyboard_attempts < 2 {
++            keyboard_attempts += 1;
++            let mut response = handle
++                .authenticate_keyboard_interactive_start(username, None)
++                .await?;
++            result = loop {
++                match response {
++                    KeyboardInteractiveAuthResponse::Success => break AuthResult::Success,
++                    KeyboardInteractiveAuthResponse::Failure {
++                        remaining_methods,
++                        partial_success,
++                    } => {
++                        break AuthResult::Failure {
++                            remaining_methods,
++                            partial_success,
++                        };
++                    }
++                    KeyboardInteractiveAuthResponse::InfoRequest {
++                        name,
++                        instructions,
++                        prompts,
++                    } => {
++                        // Empty protocol prompts require empty responses. Other prompts, including
++                        // visible username and hidden OTP fields, always require explicit user input.
++                        let mut responses = vec![String::new(); prompts.len()];
++                        let positions = prompts
++                            .iter()
++                            .enumerate()
++                            .filter_map(|(index, prompt)| {
++                                (!prompt.prompt.is_empty()).then_some(index)
++                            })
++                            .collect::<Vec<_>>();
++                        let challenge = AuthenticationChallenge {
++                            name,
++                            instructions,
++                            prompts: prompts
++                                .into_iter()
++                                .filter(|prompt| !prompt.prompt.is_empty())
++                                .map(|prompt| AuthenticationPrompt {
++                                    text: prompt.prompt,
++                                    echo: prompt.echo,
++                                })
++                                .collect(),
++                        };
++                        if !challenge.prompts.is_empty()
++                            || !challenge.name.is_empty()
++                            || !challenge.instructions.is_empty()
++                        {
++                            let answers = prompt(challenge).await?;
++                            if answers.len() != positions.len() {
++                                bail!(
++                                    "The SSH authentication prompt returned an invalid response count"
++                                );
++                            }
++                            for (position, answer) in positions.into_iter().zip(answers) {
++                                responses[position] = answer;
++                            }
++                        }
++                        response = handle
++                            .authenticate_keyboard_interactive_respond(responses)
++                            .await?;
++                    }
++                }
++            };
++            rejected = true;
++            continue;
++        }
++
++        return Err(authentication_error(&methods, rejected, partial));
++    }
++}
++
++fn authentication_error(methods: &MethodSet, rejected: bool, partial: bool) -> anyhow::Error {
++    let methods = methods
++        .iter()
++        .map(<&str>::from)
++        .collect::<Vec<_>>()
++        .join(", ");
++    let methods = if methods.is_empty() { "none" } else { &methods };
++    if rejected {
++        anyhow::anyhow!(
++            "SSH authentication was rejected. Check your credentials or required authentication factors. Server methods: {methods}"
++        )
++    } else if partial {
++        anyhow::anyhow!(
++            "SSH authentication needs another factor, but no supported method or usable local key is available. Server methods: {methods}"
++        )
++    } else {
++        anyhow::anyhow!(
++            "No supported SSH authentication method or usable local key is available. Server methods: {methods}"
++        )
++    }
++}
+diff --git a/crates/remote/src/transport/russh_ssh.rs b/crates/remote/src/transport/russh_ssh.rs
+--- a/crates/remote/src/transport/russh_ssh.rs
++++ b/crates/remote/src/transport/russh_ssh.rs
+@@ -17,7 +17,6 @@
+ use gpui_tokio::Tokio;
+ use prost::Message as _;
+ use rpc::proto::Envelope;
+-use russh::keys::PrivateKeyWithHashAlg;
+ use std::sync::{
+     Arc,
+     atomic::{AtomicBool, Ordering},
+@@ -81,86 +80,99 @@
+     "id_rsa",
+ ];
+ 
+-/// Try to authenticate using SSH keys from `~/.ssh/`.
+-/// Returns `true` if authentication succeeded with any key.
+-async fn try_key_auth(
+-    session: &Arc<tokio::sync::Mutex<SessionHandle>>,
+-    username: &str,
++struct AuthenticationRequest {
++    challenge: AuthenticationChallenge,
++    response: futures::channel::oneshot::Sender<Result<Vec<String>>>,
++}
++
++fn load_authentication_keys() -> Vec<Arc<russh::keys::PrivateKey>> {
++    let Some(home) = std::env::home_dir() else {
++        return Vec::new();
++    };
++    KEY_FILE_NAMES
++        .iter()
++        .filter_map(|name| {
++            let path = home.join(".ssh").join(name);
++            if !path.exists() {
++                return None;
++            }
++            match russh::keys::load_secret_key(&path, None) {
++                Ok(key) => Some(Arc::new(key)),
++                Err(error) => {
++                    log::info!("[russh] skipping {} (load error: {error})", path.display());
++                    None
++                }
++            }
++        })
++        .collect()
++}
++
++async fn authenticate(
++    session: Arc<tokio::sync::Mutex<SessionHandle>>,
++    username: String,
++    endpoint: String,
++    password: Option<String>,
++    delegate: Arc<dyn RemoteClientDelegate>,
+     cx: &mut AsyncApp,
+-) -> bool {
+-    let home = match std::env::var("HOME") {
+-        Ok(home) => std::path::PathBuf::from(home),
+-        Err(_) => {
+-            log::info!("[russh] could not determine home directory for key auth");
+-            return false;
+-        }
+-    };
+-
+-    let ssh_dir = home.join(".ssh");
+-    for key_name in KEY_FILE_NAMES {
+-        let key_path = ssh_dir.join(key_name);
+-        if !key_path.exists() {
+-            continue;
+-        }
+-
+-        log::info!("[russh] trying key: {}", key_path.display());
+-
+-        let key = match russh::keys::load_secret_key(&key_path, None) {
+-            Ok(key) => key,
+-            Err(error) => {
+-                log::info!(
+-                    "[russh] skipping {} (load error: {error})",
+-                    key_path.display()
+-                );
+-                continue;
+-            }
+-        };
+-
+-        let key = Arc::new(key);
+-
+-        let result = Tokio::spawn_result(cx, {
+-            let session = session.clone();
+-            let username = username.to_string();
+-            let key = key.clone();
+-            async move {
+-                let mut handle = session.lock().await;
+-                // Query the server for the best RSA hash algorithm.
+-                // For non-RSA keys this is harmless — PrivateKeyWithHashAlg
+-                // ignores the hash_alg for Ed25519/ECDSA.
+-                let hash_alg = handle
+-                    .best_supported_rsa_hash()
++) -> Result<()> {
++    let (requests_tx, mut requests_rx) =
++        futures::channel::mpsc::unbounded::<AuthenticationRequest>();
++    let prompts = cx.spawn(async move |cx| {
++        while let Some(request) = requests_rx.next().await {
++            let (response_tx, response_rx) = futures::channel::oneshot::channel();
++            delegate.ask_authentication(endpoint.clone(), request.challenge, response_tx, cx);
++            let responses = async {
++                let encrypted = response_rx
+                     .await
+-                    .ok()
+-                    .flatten()
+-                    .flatten();
+-
+-                let key_with_hash = PrivateKeyWithHashAlg::new(key, hash_alg);
+-                handle
+-                    .authenticate_publickey(&username, key_with_hash)
+-                    .await
+-                    .map_err(anyhow::Error::from)
+-            }
+-        })
+-        .await;
+-
+-        match result {
+-            Ok(russh::client::AuthResult::Success) => {
+-                log::info!("[russh] authenticated with key: {}", key_path.display());
+-                return true;
+-            }
+-            Ok(_) => {
+-                log::info!("[russh] key rejected: {}", key_path.display());
+-            }
+-            Err(error) => {
+-                log::info!(
+-                    "[russh] key auth error for {}: {error}",
+-                    key_path.display()
+-                );
+-            }
+-        }
+-    }
+-
+-    false
++                    .context("SSH authentication cancelled")??;
++                encrypted
++                    .into_iter()
++                    .map(|response| response.decrypt(IKnowWhatIAmDoingAndIHaveReadTheDocs))
++                    .collect::<Result<Vec<_>>>()
++            }
++            .await;
++            // A failed send contains the responses, so never log its error value.
++            if request.response.send(responses).is_err() {
++                log::debug!("[russh] authentication request no longer active");
++            }
++        }
++    });
++    let result = Tokio::spawn_result(cx, async move {
++        let keys = load_authentication_keys();
++        let mut handle = session.lock().await;
++        let result =
++            russh_auth::authenticate(&mut handle, &username, keys, password, move |challenge| {
++                let requests_tx = requests_tx.clone();
++                async move {
++                    let (response, receive) = futures::channel::oneshot::channel();
++                    requests_tx
++                        .unbounded_send(AuthenticationRequest {
++                            challenge,
++                            response,
++                        })
++                        .map_err(|_| anyhow!("SSH authentication prompt is unavailable"))?;
++                    receive.await.context("SSH authentication cancelled")?
++                }
++                .boxed()
++            })
++            .await;
++        if result.is_err() {
++            if let Err(error) = handle
++                .disconnect(
++                    russh::Disconnect::ByApplication,
++                    "Authentication stopped",
++                    "en",
++                )
++                .await
++            {
++                log::debug!("[russh] disconnect after authentication: {error}");
++            }
++        }
++        result
++    })
++    .await;
++    drop(prompts);
++    result
+ }
+ 
+ /// Resolve the remote server binary path in `~/.zed_server/`.
+@@ -206,7 +218,8 @@
+         delegate.set_status(Some("Connecting"), cx);
+ 
+         let config = Arc::new(russh::client::Config {
+-            inactivity_timeout: Some(std::time::Duration::from_secs(30)),
++            // Interactive authentication may require time to enter a second factor.
++            inactivity_timeout: Some(std::time::Duration::from_secs(300)),
+             keepalive_interval: Some(std::time::Duration::from_secs(15)),
+             keepalive_max: 3,
+             ..Default::default()
+@@ -227,62 +240,15 @@
+ 
+         delegate.set_status(Some("Authenticating"), cx);
+ 
+-        // Try SSH key authentication first
+-        let mut authenticated = try_key_auth(&session, &username, cx).await;
+-
+-        // Try password if one was provided with the connection options
+-        if !authenticated {
+-            if let Some(password) = &connection_options.password {
+-                let result = Tokio::spawn_result(cx, {
+-                    let session = session.clone();
+-                    let username = username.clone();
+-                    let password = password.clone();
+-                    async move {
+-                        let mut handle = session.lock().await;
+-                        handle
+-                            .authenticate_password(&username, &password)
+-                            .await
+-                            .map_err(anyhow::Error::from)
+-                    }
+-                })
+-                .await?;
+-
+-                authenticated = matches!(result, russh::client::AuthResult::Success);
+-            }
+-        }
+-
+-        if !authenticated {
+-            // Prompt for password via delegate
+-            let (password_tx, password_rx) = futures::channel::oneshot::channel();
+-            delegate.ask_password(
+-                format!("Password for {}@{}:", username, host),
+-                password_tx,
+-                cx,
+-            );
+-
+-            let encrypted_password = password_rx
+-                .await
+-                .context("password prompt was cancelled")?;
+-            let password =
+-                encrypted_password.decrypt(IKnowWhatIAmDoingAndIHaveReadTheDocs)?;
+-
+-            let result = Tokio::spawn_result(cx, {
+-                let session = session.clone();
+-                let username = username.clone();
+-                async move {
+-                    let mut handle = session.lock().await;
+-                    handle
+-                        .authenticate_password(&username, &password)
+-                        .await
+-                        .map_err(anyhow::Error::from)
+-                }
+-            })
+-            .await?;
+-
+-            if !matches!(result, russh::client::AuthResult::Success) {
+-                anyhow::bail!("authentication failed: incorrect password");
+-            }
+-        }
++        authenticate(
++            session.clone(),
++            username.clone(),
++            format!("{username}@{host}:{port}"),
++            connection_options.password.clone(),
++            delegate.clone(),
++            cx,
++        )
++        .await?;
+ 
+         delegate.set_status(Some("Probing remote"), cx);
+ 
+diff --git a/crates/zed_ios/src/authentication_prompt.rs b/crates/zed_ios/src/authentication_prompt.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/zed_ios/src/authentication_prompt.rs
+@@ -0,0 +1,283 @@
++use anyhow::{Context as _, Result};
++use askpass::EncryptedPassword;
++use editor::Editor;
++use futures::{FutureExt as _, channel::oneshot};
++use gpui::{
++    AnyWindowHandle, AsyncApp, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global,
++    WeakEntity,
++};
++use remote::AuthenticationChallenge;
++use std::sync::Arc;
++use ui::prelude::*;
++use util::ResultExt as _;
++
++#[derive(Default)]
++struct PromptGate(Arc<futures::lock::Mutex<()>>);
++impl Global for PromptGate {}
++
++type Response = Result<Vec<EncryptedPassword>>;
++
++pub fn request(
++    window: AnyWindowHandle,
++    endpoint: String,
++    challenge: AuthenticationChallenge,
++    mut response: oneshot::Sender<Response>,
++    cx: &mut AsyncApp,
++) {
++    let gate = cx.update(|cx| cx.default_global::<PromptGate>().0.clone());
++    cx.spawn(async move |cx| {
++        // Auto-connect can authenticate several hosts at once. Never overwrite an active prompt.
++        let _guard = gate.lock().await;
++        if response.is_canceled() {
++            return;
++        }
++        let (send, receive) = oneshot::channel();
++        let shown = window.update(cx, |_, window, cx| {
++            if let Some(Some(landing)) = window.root::<crate::connection_landing::ConnectionLanding>() {
++                let prompt = cx.new(|cx| AuthenticationPrompt::new(endpoint, challenge, send, window, cx));
++                let weak = prompt.downgrade();
++                landing.update(cx, |landing, cx| landing.show_authentication_prompt(prompt, window, cx));
++                Ok(weak)
++            } else if let Some(Some(multi)) = window.root::<workspace::MultiWorkspace>() {
++                let workspace = multi.read(cx).workspace().clone();
++                workspace.update(cx, |workspace, cx| {
++                    anyhow::ensure!(!workspace.has_active_modal(window, cx),
++                        "Close the open dialog and reconnect to enter SSH authentication responses");
++                    workspace.toggle_modal(window, cx, |window, cx| {
++                        AuthenticationPrompt::new(endpoint, challenge, send, window, cx)
++                    });
++                    workspace.active_modal::<AuthenticationPrompt>(cx)
++                        .map(|prompt| prompt.downgrade())
++                        .context("Could not open the SSH authentication dialog")
++                })
++            } else {
++                anyhow::bail!("SSH authentication is unavailable in this window")
++            }
++        }).and_then(|shown| shown);
++        let prompt: WeakEntity<AuthenticationPrompt> = match shown {
++            Ok(prompt) => prompt,
++            Err(error) => {
++                if response.send(Err(error)).is_err() {
++                    log::debug!("SSH authentication request no longer active");
++                }
++                return;
++            }
++        };
++        let result = {
++            let cancelled = response.cancellation().fuse();
++            let receive = receive.fuse();
++            futures::pin_mut!(cancelled, receive);
++            futures::select! {
++                _ = cancelled => None,
++                result = receive => Some(result.context("SSH authentication cancelled").and_then(|result| result)),
++            }
++        };
++        // Also close the UI if its connection task was cancelled while waiting for the user.
++        if prompt.is_upgradable() {
++            prompt.update(cx, |_, cx| cx.emit(DismissEvent)).log_err();
++        }
++        if let Some(result) = result {
++            // Send errors contain responses, which must never be logged.
++            if response.send(result).is_err() {
++                log::debug!("SSH authentication request no longer active");
++            }
++        }
++    }).detach();
++}
++
++pub struct AuthenticationPrompt {
++    endpoint: String,
++    challenge: AuthenticationChallenge,
++    editors: Vec<Entity<Editor>>,
++    focus_handle: FocusHandle,
++    cancel_focus: FocusHandle,
++    continue_focus: FocusHandle,
++    response: Option<oneshot::Sender<Response>>,
++    error: Option<SharedString>,
++}
++
++impl AuthenticationPrompt {
++    fn new(
++        endpoint: String,
++        challenge: AuthenticationChallenge,
++        response: oneshot::Sender<Response>,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Self {
++        let editors = challenge
++            .prompts()
++            .iter()
++            .map(|prompt| {
++                cx.new(|cx| {
++                    let mut editor = Editor::single_line(window, cx);
++                    editor.set_masked(!prompt.echo(), cx);
++                    editor
++                })
++            })
++            .collect();
++        Self {
++            endpoint,
++            challenge,
++            editors,
++            focus_handle: cx.focus_handle(),
++            cancel_focus: cx.focus_handle(),
++            continue_focus: cx.focus_handle(),
++            response: Some(response),
++            error: None,
++        }
++    }
++
++    fn submit(&mut self, cx: &mut Context<Self>) {
++        let answers = self
++            .editors
++            .iter()
++            .map(|editor| EncryptedPassword::try_from(editor.read(cx).text(cx).as_str()))
++            .collect::<Result<Vec<_>>>();
++        match answers {
++            Ok(answers) => self.finish(Ok(answers), cx),
++            Err(_) => {
++                self.error = Some("Could not prepare authentication responses. Try again.".into());
++                cx.notify();
++            }
++        }
++    }
++
++    fn finish(&mut self, result: Response, cx: &mut Context<Self>) {
++        if let Some(response) = self.response.take() {
++            if response.send(result).is_err() {
++                log::debug!("SSH authentication request no longer active");
++            }
++        }
++        cx.emit(DismissEvent);
++    }
++
++    fn cancel(&mut self, cx: &mut Context<Self>) {
++        self.finish(Err(anyhow::anyhow!("SSH authentication cancelled")), cx);
++    }
++
++    fn move_focus(&self, backwards: bool, window: &mut Window, cx: &mut App) {
++        let handles = self
++            .editors
++            .iter()
++            .map(|editor| editor.focus_handle(cx))
++            .chain([self.cancel_focus.clone(), self.continue_focus.clone()])
++            .collect::<Vec<_>>();
++        let current = handles
++            .iter()
++            .position(|handle| handle.contains_focused(window, cx))
++            .unwrap_or(0);
++        let next = if backwards {
++            (current + handles.len() - 1) % handles.len()
++        } else {
++            (current + 1) % handles.len()
++        };
++        if let Some(handle) = handles.get(next) {
++            handle.focus(window, cx);
++        }
++    }
++}
++
++impl Focusable for AuthenticationPrompt {
++    fn focus_handle(&self, cx: &App) -> FocusHandle {
++        self.editors
++            .first()
++            .map(|editor| editor.focus_handle(cx))
++            .unwrap_or_else(|| self.continue_focus.clone())
++    }
++}
++impl EventEmitter<DismissEvent> for AuthenticationPrompt {}
++impl workspace::ModalView for AuthenticationPrompt {
++    fn fade_out_background(&self) -> bool {
++        true
++    }
++}
++
++impl Render for AuthenticationPrompt {
++    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
++        let colors = cx.theme().colors();
++        v_flex()
++            .id("ssh-authentication")
++            .key_context("SshAuthentication")
++            .track_focus(&self.focus_handle)
++            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
++                if this.cancel_focus.is_focused(window) {
++                    this.cancel(cx);
++                } else {
++                    this.submit(cx);
++                }
++            }))
++            .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| this.cancel(cx)))
++            .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
++                this.move_focus(false, window, cx)
++            }))
++            .on_action(cx.listener(|this, _: &menu::SelectPrevious, window, cx| {
++                this.move_focus(true, window, cx)
++            }))
++            .w(rems(32.))
++            .max_w(
++                (window.viewport_size().width - rems(2.).to_pixels(window.rem_size())).max(px(0.)),
++            )
++            .max_h(
++                (window.viewport_size().height - rems(7.).to_pixels(window.rem_size())).max(px(0.)),
++            )
++            .overflow_y_scroll()
++            .p_4()
++            .gap_3()
++            .rounded_lg()
++            .border_1()
++            .border_color(colors.border)
++            .bg(colors.elevated_surface_background)
++            .child(Label::new("SSH authentication"))
++            .when(!self.endpoint.is_empty(), |this| {
++                this.child(Label::new(self.endpoint.clone()).color(Color::Muted))
++            })
++            .when(!self.challenge.name().is_empty(), |this| {
++                this.child(Label::new(self.challenge.name().to_owned()))
++            })
++            .when(!self.challenge.instructions().is_empty(), |this| {
++                this.child(Label::new(self.challenge.instructions().to_owned()).color(Color::Muted))
++            })
++            .children(
++                self.challenge
++                    .prompts()
++                    .iter()
++                    .zip(&self.editors)
++                    .enumerate()
++                    .map(|(position, (prompt, editor))| {
++                        // SSH response positions are stable identities within this immutable challenge.
++                        v_flex()
++                            .id(("ssh-authentication-field", position))
++                            .gap_1()
++                            .child(Label::new(prompt.text().to_owned()))
++                            .child(
++                                div()
++                                    .p_2()
++                                    .rounded_md()
++                                    .border_1()
++                                    .border_color(colors.border)
++                                    .bg(colors.editor_background)
++                                    .child(editor.clone()),
++                            )
++                    }),
++            )
++            .when_some(self.error.clone(), |this, error| {
++                this.child(Label::new(error).color(Color::Error))
++            })
++            .child(
++                h_flex()
++                    .gap_2()
++                    .justify_end()
++                    .child(
++                        Button::new("cancel-authentication", "Cancel")
++                            .track_focus(&self.cancel_focus)
++                            .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
++                    )
++                    .child(
++                        Button::new("continue-authentication", "Continue")
++                            .track_focus(&self.continue_focus)
++                            .style(ButtonStyle::Filled)
++                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
++                    ),
++            )
++    }
++}
+diff --git a/crates/zed_ios/src/connection_landing.rs b/crates/zed_ios/src/connection_landing.rs
+--- a/crates/zed_ios/src/connection_landing.rs
++++ b/crates/zed_ios/src/connection_landing.rs
+@@ -1,7 +1,6 @@
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ 
+-use askpass::EncryptedPassword;
+ use editor::{
+     Editor,
+     actions::{Backtab, Tab},
+@@ -875,19 +874,13 @@
+     port_editor: Entity<Editor>,
+     password_editor: Entity<Editor>,
+     project_path_editor: Entity<Editor>,
+-    password_prompt: Option<PasswordPromptState>,
++    authentication_prompt: Option<Entity<crate::authentication_prompt::AuthenticationPrompt>>,
+     error_detail: Option<ErrorDetailState>,
+ }
+ 
+ struct ErrorDetailState {
+     host_index: usize,
+     message: SharedString,
+-}
+-
+-struct PasswordPromptState {
+-    prompt_text: SharedString,
+-    editor: Entity<Editor>,
+-    tx: Option<futures::channel::oneshot::Sender<EncryptedPassword>>,
+ }
+ 
+ impl ConnectionLanding {
+@@ -962,7 +955,7 @@
+             port_editor,
+             password_editor,
+             project_path_editor,
+-            password_prompt: None,
++            authentication_prompt: None,
+             error_detail: None,
+         };
+ 
+@@ -1881,103 +1874,25 @@
+         cx.notify();
+     }
+ 
+-    fn show_password_prompt(
++    pub(crate) fn show_authentication_prompt(
+         &mut self,
+-        prompt: String,
+-        tx: futures::channel::oneshot::Sender<EncryptedPassword>,
++        prompt: Entity<crate::authentication_prompt::AuthenticationPrompt>,
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) {
+-        let editor = cx.new(|cx| {
+-            let mut editor = Editor::single_line(window, cx);
+-            editor.set_placeholder_text("enter password", window, cx);
+-            editor.set_masked(true, cx);
+-            editor
+-        });
+-        editor.focus_handle(cx).focus(window, cx);
+-        self.password_prompt = Some(PasswordPromptState {
+-            prompt_text: SharedString::from(prompt),
+-            editor,
+-            tx: Some(tx),
+-        });
++        cx.subscribe_in(
++            &prompt,
++            window,
++            |this, _, _: &gpui::DismissEvent, window, cx| {
++                this.authentication_prompt = None;
++                this.focus_handle.focus(window, cx);
++                cx.notify();
++            },
++        )
++        .detach();
++        prompt.focus_handle(cx).focus(window, cx);
++        self.authentication_prompt = Some(prompt);
+         cx.notify();
+-    }
+-
+-    fn submit_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        if let Some(ref mut state) = self.password_prompt {
+-            if let Some(tx) = state.tx.take() {
+-                let password_text = state.editor.read(cx).text(cx);
+-                match EncryptedPassword::try_from(password_text.as_ref()) {
+-                    Ok(encrypted) => {
+-                        tx.send(encrypted).ok();
+-                    }
+-                    Err(error) => {
+-                        log::error!("[zed_ios] failed to encrypt password: {error}");
+-                    }
+-                }
+-            }
+-        }
+-        self.password_prompt = None;
+-        self.focus_handle.focus(window, cx);
+-        cx.notify();
+-    }
+-
+-    fn cancel_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        if let Some(ref mut state) = self.password_prompt {
+-            state.tx.take();
+-        }
+-        self.password_prompt = None;
+-        self.focus_handle.focus(window, cx);
+-        cx.notify();
+-    }
+-
+-    fn render_password_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+-        let state = self
+-            .password_prompt
+-            .as_ref()
+-            .expect("called without prompt");
+-        let colors = cx.theme().colors();
+-
+-        div()
+-            .id("password-overlay")
+-            .absolute()
+-            .size_full()
+-            .bg(colors.background.opacity(0.9))
+-            .flex()
+-            .flex_col()
+-            .items_center()
+-            .justify_center()
+-            .gap_4()
+-            .child(Label::new(state.prompt_text.clone()).color(Color::Default))
+-            .child(
+-                div()
+-                    .w_80()
+-                    .rounded_md()
+-                    .border_1()
+-                    .border_color(colors.border)
+-                    .bg(colors.editor_background)
+-                    .px_2()
+-                    .py_1()
+-                    .child(state.editor.clone()),
+-            )
+-            .child(
+-                h_flex()
+-                    .gap_2()
+-                    .child(
+-                        ui::Button::new("pw-cancel", "Cancel")
+-                            .style(ButtonStyle::Subtle)
+-                            .on_click(cx.listener(|this, _, window, cx| {
+-                                this.cancel_password(window, cx);
+-                            })),
+-                    )
+-                    .child(
+-                        ui::Button::new("pw-submit", "Submit")
+-                            .style(ButtonStyle::Filled)
+-                            .on_click(cx.listener(|this, _, window, cx| {
+-                                this.submit_password(window, cx);
+-                            })),
+-                    ),
+-            )
+     }
+ 
+     fn render_error_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+@@ -2768,12 +2683,24 @@
+             }
+         }
+ 
+-        if self.password_prompt.is_some() {
+-            content = content.child(self.render_password_overlay(cx));
+-        }
+-
+         if self.error_detail.is_some() {
+             content = content.child(self.render_error_overlay(cx));
++        }
++
++        if let Some(prompt) = &self.authentication_prompt {
++            content = content.child(
++                div()
++                    .absolute()
++                    .inset_0()
++                    .size_full()
++                    .occlude()
++                    .bg(colors.background.opacity(0.9))
++                    .flex()
++                    .items_center()
++                    .justify_center()
++                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
++                    .child(prompt.clone()),
++            );
+         }
+ 
+         content
+@@ -2794,25 +2721,39 @@
+ }
+ 
+ impl remote::RemoteClientDelegate for IosRemoteClientDelegate {
++    fn ask_authentication(
++        &self,
++        endpoint: String,
++        challenge: remote::AuthenticationChallenge,
++        tx: futures::channel::oneshot::Sender<anyhow::Result<Vec<askpass::EncryptedPassword>>>,
++        cx: &mut AsyncApp,
++    ) {
++        crate::authentication_prompt::request(self.window, endpoint, challenge, tx, cx);
++    }
++
+     fn ask_password(
+         &self,
+         prompt: String,
+         tx: futures::channel::oneshot::Sender<askpass::EncryptedPassword>,
+         cx: &mut AsyncApp,
+     ) {
+-        log::info!("[zed_ios] Password prompt requested: {prompt}");
+-        let result = self.window.update(cx, |_, window, cx| {
+-            if let Some(Some(landing)) = window.root::<ConnectionLanding>() {
+-                landing.update(cx, |landing, cx| {
+-                    landing.show_password_prompt(prompt, tx, window, cx);
+-                });
+-            } else {
+-                log::error!("[zed_ios] cannot show password prompt: landing screen not active");
++        let (response, receive) = futures::channel::oneshot::channel();
++        crate::authentication_prompt::request(
++            self.window,
++            String::new(),
++            remote::AuthenticationChallenge::password(prompt),
++            response,
++            cx,
++        );
++        cx.spawn(async move |_| match receive.await {
++            Ok(Ok(mut answers)) if answers.len() == 1 => {
++                if tx.send(answers.remove(0)).is_err() {
++                    log::debug!("SSH password request no longer active");
++                }
+             }
+-        });
+-        if let Err(error) = result {
+-            log::error!("[zed_ios] failed to show password prompt: {error:#}");
+-        }
++            _ => log::debug!("SSH password prompt cancelled"),
++        })
++        .detach();
+     }
+ 
+     fn get_download_url(
+diff --git a/crates/zed_ios/src/lib.rs b/crates/zed_ios/src/lib.rs
+--- a/crates/zed_ios/src/lib.rs
++++ b/crates/zed_ios/src/lib.rs
+@@ -5,6 +5,9 @@
+ //! open windows, and manage the application lifecycle.
+ //!
+ //! See: ios/plan.md for full architecture details.
++
++#[cfg(target_os = "ios")]
++mod authentication_prompt;
+ 
+ #[cfg(target_os = "ios")]
+ mod connection_landing;
+@@ -955,6 +958,13 @@
+                 Err(error) => log::error!("Failed to load vim keymap: {error}"),
+             }
+         }
++        cx.bind_keys([
++            gpui::KeyBinding::new("enter", menu::Confirm, Some("SshAuthentication")),
++            gpui::KeyBinding::new("escape", menu::Cancel, Some("SshAuthentication")),
++            gpui::KeyBinding::new("ctrl-c", menu::Cancel, Some("SshAuthentication")),
++            gpui::KeyBinding::new("tab", menu::SelectNext, Some("SshAuthentication")),
++            gpui::KeyBinding::new("shift-tab", menu::SelectPrevious, Some("SshAuthentication")),
++        ]);
+     }
+ 
+     pub fn ios_open_window() {

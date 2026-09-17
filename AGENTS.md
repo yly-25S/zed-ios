@@ -17,8 +17,10 @@
 | --- | --- |
 | `.github/workflows/macos-preflight.yml` | 用小型 UIKit Swift 编译验证 macOS runner 和 iOS 工具链 |
 | `.github/workflows/build-ios.yml` | 手动触发完整构建、缓存与产物上传 |
-| `scripts/prepare-source.py` | 应用 iOS 信任补丁、审核过的锁文件，并在上游 Cargo build phase 加入 `--locked` |
+| `scripts/prepare-source.py` | 应用 iOS 信任/SSH 认证补丁、审核过的锁文件，并在上游 Cargo build phase 加入 `--locked` |
 | `patches/ios-workspace-trust.patch` | iOS workspace 信任初始化、状态栏入口和首次提示；验收见 `docs/workspace-trust.md` |
+| `patches/ios-keyboard-interactive.patch` | SSH 方法协商、多轮交互认证及 iPad 提示；验收见 `docs/ssh-authentication.md` |
+| `tests/ssh-auth/`、`tests/verify-source.py` | 真实 russh 协议测试及补丁/源码归档还原检查 |
 | `scripts/build-ios.sh` | Xcode 构建、检查、打包及对应源码归档 |
 | `Cargo.lock.ios` | 当前源码对应的审核后依赖锁文件 |
 | `source/` | 忽略的上游源码目录；本次本地目录是稀疏检出，CI 检出完整源码 |
@@ -63,7 +65,7 @@
 - 不要只看命令行 build setting 推断成品信息。本次虽然传入 `CURRENT_PROJECT_VERSION`，实际 Info.plist 仍是上游写定的版本 `1.0 (1)`。若修改版本号，必须检查最终 plist。
 - IPA 结构应为 `Payload/Zed.app`；使用新的临时打包目录，避免旧 Payload 文件混入。保留 App bundle 结构，并检查 ZIP 完整性。
 - 发布包同时保留完整对应源码、构建修改补丁、许可证、构建元数据和校验和。本次通过 `git archive HEAD` 加 `git diff --binary` 生成源码与补丁。
-- 当前补丁命令 `git diff --binary HEAD` 包含已暂存和未暂存的已跟踪改动，不包含未跟踪文件。以后新增客户端源文件或调整补丁流程时，必须确认所有实际构建输入都能从归档与补丁恢复；必要时修正归档机制。
+- 当前补丁命令 `git diff --binary HEAD` 包含已暂存和未暂存的已跟踪改动。`prepare-source.py` 通过 `git apply --intent-to-add` 将补丁新增的源文件纳入其中；任意其他未跟踪文件仍不包含。新增构建输入后运行 `tests/verify-source.py` 检查完整还原。
 - 核对归档还原后应用补丁的结果，尤其是锁文件和上游构建脚本。不要只附一个会变化的分支链接充当对应源码。
 - 当前应用产物保留 30 天，诊断日志保留 14 天；Actions 链接不是永久存档。重要成品下载到 `artifacts/` 并验证 `SHA256SUMS`。
 - 大文件下载先用 `gh run download`。代理明显拖慢下载时可诊断官方重定向链路，必要时对支持 Range 的最终官方存储端点分块重试；必须验证长度、最终摘要和 ZIP，不能拼接未校验的块。不要把 GitHub token 或临时签名下载 URL 写入日志、仓库或记录文件。
@@ -73,8 +75,8 @@
 - 以固定提交的实际代码为准；上游 README 中的计划描述不等于功能已经实现。
 - 当前 iOS 实现不会自动部署 remote server，而是选择远端 `~/.zed_server/zed-remote-server-*` 中修改时间最新的程序，并通过 SSH 启动 `proxy --identifier ...`。不需要新增监听端口或设置常驻系统服务。
 - 优先使用同一 PR SHA 的 remote server。这个移植涉及远端协议改动，不能假定任意官方最新版或已有桌面版部署的服务端一定兼容；多个版本共存时还需检查实际选中的文件。
-- 当前 `crates/remote/src/transport/russh_ssh.rs` 只尝试有限的本地密钥路径和 `authenticate_password`，没有 keyboard-interactive 支持；本次锁定的 russh 是 **0.58.0**，查 API 应使用此版本。
-- SSH `password` 与 `keyboard-interactive` 是不同方法，即使 PAM 最后询问的是同一个账户密码。服务器只提供 `publickey,keyboard-interactive` 时，现客户端仍会误报 `authentication failed: incorrect password`。
+- 固定上游的 `russh_ssh.rs` 仅尝试有限的本地密钥和 password。仓库认证补丁增加了方法协商及 keyboard-interactive；锁定的 russh 仍为 **0.58.0**，查 API 应使用此版本。
+- SSH `password` 与 `keyboard-interactive` 是不同方法，即使 PAM 最后询问的是同一个账户密码。服务器仅提供 `publickey,keyboard-interactive` 时，旧包会误报 `authentication failed: incorrect password`；新包需要按 `docs/ssh-authentication.md` 完成设备验收。
 - 排查时对照客户端源码、SSH 握手实际提供的方法、服务端 Match 配置和 PAM 配置。不要仅凭应用报错判断密码错误，也不要先修改服务器认证策略。
 - 远程文件可编辑、有语法高亮不代表 LSP 已启动。iOS 入口原先遗漏桌面入口的 `trusted_worktrees::init`，服务端可能一直等待项目信任。仓库补丁已补齐初始化和状态栏入口；初始化须在创建项目/workspace 前完成。编译通过仍需按 `docs/workspace-trust.md` 检查真机 Restrict/Trust 消息、信任恢复与 LSP 启动。
 - 实现 keyboard-interactive 时需处理多轮、多个或零提示、取消及部分成功；不能把保存的密码自动用于任意 OTP/用户名提示。错误信息应区分方法不支持与凭据被拒绝。

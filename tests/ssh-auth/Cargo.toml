@@ -1,0 +1,14 @@
+[package]
+name = "ios-ssh-auth-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "harness.rs"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+russh = { version = "=0.58.0", default-features = false, features = ["aws-lc-rs"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "time"] }
